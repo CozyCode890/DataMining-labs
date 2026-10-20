@@ -8,63 +8,71 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 
 /**
- * Đọc file .jsonl của Amazon Reviews'23, giữ 4 cột rating, text, asin, user_id
- * rồi chia ngẫu nhiên thành 2 file ARFF train/test (đọc-ghi từng dòng, không load cả file vào RAM).
+ * Đọc file .jsonl của Amazon Reviews'23, giữ 4 cột rating, text, asin, user_id,
+ * lấy mẫu ngẫu nhiên trên toàn file (reservoir sampling) rồi chia thành 2 file ARFF train/test.
  */
 class HealthCareArff {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** @param maxTrain số dòng train; test lấy thêm theo tỉ lệ trainRatio. maxTrain <= 0 = lấy hết. */
     public static void convert(Path input, Path trainOut, Path testOut,
-                               double trainRatio, long seed, String relation) throws IOException {
-        Files.createDirectories(trainOut.toAbsolutePath().getParent());
+                               int maxTrain, double trainRatio, long seed, String relation) throws IOException {
+        int sampleSize = maxTrain > 0 ? (int) Math.round(maxTrain / trainRatio) : Integer.MAX_VALUE;
         Random rnd = new Random(seed);
-        int train = 0, test = 0, skipped = 0;
+        List<String> rows = new ArrayList<>();
+        long seen = 0;
+        int skipped = 0;
 
-        try (BufferedReader in = Files.newBufferedReader(input, StandardCharsets.UTF_8);
-             BufferedWriter trainW = Files.newBufferedWriter(trainOut, StandardCharsets.UTF_8);
-             BufferedWriter testW = Files.newBufferedWriter(testOut, StandardCharsets.UTF_8)) {
-
-            writeHeader(trainW, relation + "-train");
-            writeHeader(testW, relation + "-test");
-
+        // Reservoir sampling: mỗi dòng trong file có xác suất được chọn như nhau, chỉ giữ sampleSize dòng trong RAM
+        try (BufferedReader in = Files.newBufferedReader(input, StandardCharsets.UTF_8)) {
             String line;
             while ((line = in.readLine()) != null) {
                 if (line.isBlank()) continue;
-                JsonNode node;
+                int slot = seen < sampleSize ? -1 : (int) Math.min(rnd.nextLong(seen + 1), Integer.MAX_VALUE);
+                seen++;
+                if (slot >= sampleSize) continue;   // không được chọn -> khỏi parse JSON
+
+                String row;
                 try {
-                    node = MAPPER.readTree(line);
+                    row = toRow(MAPPER.readTree(line));
                 } catch (IOException e) {
                     skipped++;
                     continue;
                 }
-
-                String row = toRow(node);
-                if (rnd.nextDouble() < trainRatio) {
-                    trainW.write(row);
-                    train++;
-                } else {
-                    testW.write(row);
-                    test++;
-                }
+                if (slot < 0) rows.add(row);
+                else rows.set(slot, row);
             }
         }
 
-        System.out.printf("Train: %,d dong -> %s%n", train, trainOut);
-        System.out.printf("Test : %,d dong -> %s%n", test, testOut);
+        Collections.shuffle(rows, rnd);
+        int trainSize = maxTrain > 0 ? Math.min(maxTrain, rows.size()) : (int) Math.round(rows.size() * trainRatio);
+        write(trainOut, relation + "-train", rows.subList(0, trainSize));
+        write(testOut, relation + "-test", rows.subList(trainSize, rows.size()));
+
+        System.out.printf("Doc %,d dong, lay mau %,d%n", seen, rows.size());
+        System.out.printf("Train: %,d dong -> %s%n", trainSize, trainOut);
+        System.out.printf("Test : %,d dong -> %s%n", rows.size() - trainSize, testOut);
         if (skipped > 0) System.out.printf("Bo qua %,d dong JSON loi%n", skipped);
     }
 
-    private static void writeHeader(BufferedWriter w, String relation) throws IOException {
-        w.write("@relation " + Utils.quote(relation) + "\n\n");
-        w.write("@attribute rating {1,2,3,4,5}\n");
-        w.write("@attribute text string\n");
-        w.write("@attribute asin string\n");
-        w.write("@attribute user_id string\n\n");
-        w.write("@data\n");
+    private static void write(Path out, String relation, List<String> rows) throws IOException {
+        Files.createDirectories(out.toAbsolutePath().getParent());
+        try (BufferedWriter w = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
+            w.write("@relation " + Utils.quote(relation) + "\n\n");
+            w.write("@attribute rating {1,2,3,4,5}\n");
+            w.write("@attribute text string\n");
+            w.write("@attribute asin string\n");
+            w.write("@attribute user_id string\n\n");
+            w.write("@data\n");
+            for (String row : rows) w.write(row);
+        }
     }
 
     private static String toRow(JsonNode n) {
@@ -91,8 +99,9 @@ public class HealthCareArffTest {
                 Path.of("raw-data", name + ".jsonl"),
                 Path.of("datasets", name + "-train.arff"),
                 Path.of("datasets", name + "-test.arff"),
-                0.8,   // 80% train / 20% test
-                42,    // seed cố định để lần nào chạy cũng chia giống nhau
+                20_000, // số dòng train (test tự lấy thêm theo tỉ lệ -> 5.000)
+                0.8,    // 80% train / 20% test
+                42,     // seed cố định để lần nào chạy cũng ra cùng kết quả
                 name);
     }
 }
