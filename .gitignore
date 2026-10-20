@@ -1,0 +1,11 @@
+# Maven build output
+target/
+
+# Dữ liệu thô (rất nặng, tải lại từ amazon-reviews-2023.github.io)
+raw-data/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.ipynb_checkpoints/
